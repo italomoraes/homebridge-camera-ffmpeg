@@ -33,7 +33,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   private readonly api: API
   private recording: boolean
   private prebuffer: boolean
-  recordingDelegate: RecordingDelegate | null = null
+  recordingDelegate?: RecordingDelegate
 
   // keep track of sessions
   pendingSessions: Map<string, SessionInfo> = new Map()
@@ -72,13 +72,14 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         type,
         bitrateMode: 0,
         samplerate,
-        audioChannels: 1,
-        bitrate: 128 // Adicionar um valor padrão para bitrate
+        audioChannels: 1
       }
       recordingCodecs.push(entry)
     }
     
-    this.recordingDelegate = this.recording ? new RecordingDelegate(this.log, this.cameraName, this.videoConfig, this.api, this.hap, this.videoProcessor) : null
+    if (this.recording) {
+      this.recordingDelegate = new RecordingDelegate(this.log, this.cameraName, this.videoConfig, this.api, this.hap, this.videoProcessor)
+    }
 
     const options: CameraControllerOptions = {
       cameraStreamCount: this.videoConfig.maxStreams ?? 2, // HomeKit requires at least 2 streams, but 1 is also just fine
@@ -116,7 +117,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           ],
         },
       },
-      recording: this.recording ? {
+      recording: this.recording && this.recordingDelegate ? {
         options: {
           prebufferLength: PREBUFFER_LENGTH,
           overrideEventTriggerOptions: [hap.EventTriggerOption.MOTION, hap.EventTriggerOption.DOORBELL],

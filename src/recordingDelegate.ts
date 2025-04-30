@@ -114,7 +114,24 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       return
     }
 
-    const configuration = this.controller?.recordingManagement?.recordingConfiguration
+    // Corrigir o acesso à configuração de gravação
+    const recordingManagement = this.controller?.recordingManagement
+    if (!recordingManagement) {
+      this.log.error('No recording management available', this.cameraName)
+      return
+    }
+
+    // Obter a configuração de gravação de forma segura
+    let configuration: CameraRecordingConfiguration | undefined
+    // @ts-ignore - Lidando com possíveis diferenças de tipo na API do Homebridge
+    if (typeof recordingManagement.getRecordingConfiguration === 'function') {
+      // @ts-ignore - Método mais recente em algumas versões
+      configuration = recordingManagement.getRecordingConfiguration()
+    } else {
+      // @ts-ignore - Método mais antigo ou propriedade direta em outras versões
+      configuration = recordingManagement.recordingConfiguration
+    }
+
     if (!configuration) {
       this.log.error('No recording configuration available', this.cameraName)
       return
