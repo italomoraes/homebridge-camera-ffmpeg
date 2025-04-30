@@ -153,6 +153,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       } : undefined,
     }
     this.controller = new hap.CameraController(options)
+
+    if (this.recordingDelegate) {
+      (this.recordingDelegate as any).controller = this.controller;
+    }
+
     
     // Iniciar prebuffer se estiver habilitado
     if(this.prebuffer && this.recordingDelegate) {

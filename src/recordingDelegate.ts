@@ -96,14 +96,15 @@ export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP
 }
 
 export class RecordingDelegate implements CameraRecordingDelegate {
+
   updateRecordingActive(active: boolean): Promise<void> {
     this.log.info(`Recording active status changed to: ${active}`, this.cameraName)
     return Promise.resolve()
   }
 
-  updateRecordingConfiguration(): Promise<void> {
-    this.log.info('Recording configuration updated', this.cameraName)
-    return Promise.resolve()
+  public async updateRecordingConfiguration(configuration: CameraRecordingConfiguration): Promise<void> {
+    this.log.info('Recording configuration updated', this.cameraName);
+    this.recordingConfiguration = configuration;   // guarda p/ uso posterior
   }
 
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, void, unknown> {
@@ -114,27 +115,10 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       return
     }
 
-    // Corrigir o acesso à configuração de gravação
-    const recordingManagement = this.controller?.recordingManagement
-    if (!recordingManagement) {
-      this.log.error('No recording management available', this.cameraName)
-      return
-    }
-
-    // Obter a configuração de gravação de forma segura
-    let configuration: CameraRecordingConfiguration | undefined
-    // @ts-ignore - Lidando com possíveis diferenças de tipo na API do Homebridge
-    if (typeof recordingManagement.getRecordingConfiguration === 'function') {
-      // @ts-ignore - Método mais recente em algumas versões
-      configuration = recordingManagement.getRecordingConfiguration()
-    } else {
-      // @ts-ignore - Método mais antigo ou propriedade direta em outras versões
-      configuration = recordingManagement.recordingConfiguration
-    }
-
+    const configuration = this.recordingConfiguration;
     if (!configuration) {
-      this.log.error('No recording configuration available', this.cameraName)
-      return
+      this.log.error('No recording configuration available', this.cameraName);
+      return;
     }
 
     try {
@@ -148,7 +132,11 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           }
           yield packet
         }
-      }
+      } 
+      yield {
+        data: Buffer.alloc(0),   // sem payload
+        isLast: true,            // sinaliza fim do stream
+      };
     } catch (error) {
       this.log.error(`Error in recording stream: ${error}`, this.cameraName)
     }
@@ -168,6 +156,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   readonly controller?: CameraController
   private preBufferSession?: Mp4Session
   private preBuffer?: PreBuffer
+  private recordingConfiguration?: CameraRecordingConfiguration;
 
   constructor(log: Logger, cameraName: string, videoConfig: VideoConfig, api: API, hap: HAP, videoProcessor?: string) {
     this.log = log
