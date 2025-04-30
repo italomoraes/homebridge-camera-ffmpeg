@@ -56,6 +56,7 @@ export interface CameraConfig {
   motionDetection?: boolean
   motionCooldown?: number
   motionSensitivity?: number
+  videoProcessor?: string
   debug?: boolean
 }
 
