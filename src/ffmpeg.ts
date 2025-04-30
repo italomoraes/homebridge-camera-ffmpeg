@@ -153,7 +153,7 @@ export class FfmpegProcess {
     // Argumentos para o ffmpeg de detecção de movimento
     const motionArgs = [
       '-hide_banner',
-      '-loglevel', 'error',  // Reduzir o ruído de log
+      '-loglevel', 'info',
       '-rtsp_transport', 'udp',
       '-i', rtspUrl,
       '-vf', `select='gt(scene,${sensitivityThreshold})',metadata=print`,
