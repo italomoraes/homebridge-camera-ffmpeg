@@ -195,24 +195,36 @@ export class FfmpegPlatform implements DynamicPlatformPlugin {
       }
     }
 
-    if (cameraConfig.motionDetection && cameraConfig.videoConfig?.source) {
+    if (cameraConfig.motionDetection && cameraConfig.videoConfig?.stillImageSource) {
       this.log.info('Setting up FFmpeg Motion Detection for camera.', cameraConfig.name);
-
+      
+      // Configure o videoProcessor corretamente para usar o binário apropriado
+      const videoProcessor = this.config.videoProcessor || 'ffmpeg';
+      
       const motionDetectionProcess = new FfmpegProcess(
         cameraConfig.name!,
-        'motion-session', // ID fictício para o processo de motion
-        this.config.videoProcessor || 'ffmpeg',
-        cameraConfig.videoConfig.source,
+        'motion-session',
+        videoProcessor,
+        '', 
         this.log,
-        true, // debug ativo para logs de ffmpeg
-        delegate // pode passar delegate aqui, mas não será usado
+        cameraConfig.debug || false,
+        delegate
       );
 
+      // Adicione o videoProcessor ao cameraConfig para uso em startMotionDetection
+      cameraConfig.videoProcessor = videoProcessor;
+      
+      // Adicione configurações adicionais se necessário
+      if (cameraConfig.motionSensitivity === undefined) {
+        cameraConfig.motionSensitivity = 0.03; // Valor padrão para sensibilidade
+      }
+      
       motionDetectionProcess.startMotionDetection(cameraConfig, () => {
         this.log.info('Motion detected by FFmpeg.', cameraConfig.name!);
-        this.motionHandler(accessory, true, 10); // 10 segundos de "tempo ativo" do sensor
+        this.motionHandler(accessory, true, cameraConfig.motionTimeout || 10);
       });
 
+      // Salve a referência do processo para poder interrompê-lo mais tarde
       accessory.context.motionFFmpegProcess = motionDetectionProcess;
     }
 

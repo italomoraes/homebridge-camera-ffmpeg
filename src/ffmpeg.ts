@@ -138,63 +138,82 @@ export class FfmpegProcess {
   }
 
   public startMotionDetection(cameraConfig: CameraConfig, motionDetectedCallback: () => void): void {
-    
-    this.log.info(`Starting motion detection for ${cameraConfig.name}`);
-
     if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.stillImageSource) {
+      this.log.info(`Motion detection not enabled or no still image source for ${cameraConfig.name}`);
       return;
     }
 
+    this.log.info(`Starting motion detection for ${cameraConfig.name}`);
+
+    // Extrai a URL RTSP da fonte de imagem
     const rtspUrl = cameraConfig.videoConfig.stillImageSource.split(' ').slice(-1)[0];
     const cooldownSeconds = cameraConfig.motionCooldown ?? 10;
+    const sensitivityThreshold = cameraConfig.motionSensitivity ?? 0.03;
 
+    // Argumentos para o ffmpeg de detecção de movimento
     const motionArgs = [
       '-hide_banner',
-      '-rtsp_transport', 'tcp',
+      '-loglevel', 'error',  // Reduzir o ruído de log
+      '-rtsp_transport', 'udp',
       '-i', rtspUrl,
-      '-vf', "select='gt(scene,0.03)',metadata=print",
+      '-vf', `select='gt(scene,${sensitivityThreshold})',metadata=print`,
       '-an', '-f', 'null', '-'
     ];
 
-    this.log.info(`Trying to connect: ffmpeg ${motionArgs}`);
+    this.log.info(`Motion detection command: ${motionArgs.join(' ')}`);
 
-    this.motionProcess = spawn(
-      '/Users/italomoraes/.nvm/versions/node/v20.9.0/lib/node_modules/homebridge-camera-ui/node_modules/ffmpeg-for-homebridge/ffmpeg',
-      motionArgs,
-      { env }
-    );
+    try {
+      // Usa o processador de vídeo configurado em vez de um caminho hardcoded
+      this.motionProcess = spawn(
+        cameraConfig.videoProcessor || 'ffmpeg',
+        motionArgs,
+        { env }
+      );
 
-    this.motionProcess.stderr.on('data', (data) => {
-      const output = data.toString();
-      const match = output.match(/scene_score=([0-9.]+)/);
-      if (match) {
-        const score = parseFloat(match[1]);
-        const now = Date.now();
+      // Monitora a saída de erro que contém os metadados de cena
+      this.motionProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        const match = output.match(/scene_score=([0-9.]+)/);
+        
+        if (match) {
+          const score = parseFloat(match[1]);
+          const now = Date.now();
 
-        if (score > 0.03 && (!this.lastMotionTime || (now - this.lastMotionTime > cooldownSeconds * 1000))) {
-          this.lastMotionTime = now;
-          this.log.info(`[${cameraConfig.name!}] fired: motionDetectedCallback`);
-          motionDetectedCallback();
+          if (score > sensitivityThreshold && 
+              (!this.lastMotionTime || (now - this.lastMotionTime > cooldownSeconds * 1000))) {
+            this.lastMotionTime = now;
+            this.log.info(`Motion detected for ${cameraConfig.name} with score ${score}`);
+            motionDetectedCallback();
+          }
         }
-      }
-    });
+      });
 
-    this.motionProcess.stdout.on('data', (data) => {
-      const output = data.toString();
-      this.log.warn(`TESTE-OUT: ${output}`);
-      if (output.includes('scene_score')) {
-        motionDetectedCallback();
-      }
-    });
+      // Monitora erros do processo
+      this.motionProcess.on('error', (err) => {
+        this.log.error(`Motion detection process error: ${err.message}`, cameraConfig.name);
+      });
 
-    this.motionProcess.on('close', (code) => {
-      console.log(`Motion detection process exited with code ${code}`);
-      this.motionProcess = undefined;
-    });
+      // Monitora o encerramento do processo
+      this.motionProcess.on('close', (code) => {
+        this.log.info(`Motion detection process exited with code ${code}`, cameraConfig.name);
+        this.motionProcess = undefined;
+        
+        // Tenta reiniciar o processo após um atraso se não foi encerrado intencionalmente
+        if (code !== 0 && cameraConfig.motionDetection) {
+          this.log.info(`Attempting to restart motion detection in 10 seconds...`, cameraConfig.name);
+          setTimeout(() => {
+            this.startMotionDetection(cameraConfig, motionDetectedCallback);
+          }, 10000);
+        }
+      });
+    } catch (error) {
+      this.log.error(`Failed to start motion detection: ${error}`, cameraConfig.name);
+    }
   }
 
   public stopMotionDetection(): void {
     if (this.motionProcess) {
+      this.log.info('Stopping motion detection');
       this.motionProcess.kill('SIGKILL');
       this.motionProcess = undefined;
     }
