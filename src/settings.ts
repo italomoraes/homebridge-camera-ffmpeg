@@ -53,6 +53,8 @@ export interface CameraConfig {
   motionDoorbell?: boolean
   mqtt?: MqttCameraConfig
   videoConfig?: VideoConfig
+  motionDetection?: boolean
+  motionCooldown?: number
 }
 
 export interface VideoConfig {

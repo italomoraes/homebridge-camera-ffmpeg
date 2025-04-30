@@ -5,6 +5,7 @@ import type { StreamRequestCallback } from 'homebridge'
 
 import type { Logger } from './logger.js'
 import type { StreamingDelegate } from './streamingDelegate.js'
+import type { CameraConfig } from './settings.js';
 
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -12,12 +13,18 @@ import { env } from 'node:process'
 import readline from 'node:readline'
 import { FfmpegProgress } from './settings.js'
 
+
 export class FfmpegProcess {
   private readonly process: ChildProcessWithoutNullStreams
   private killTimeout?: NodeJS.Timeout
   readonly stdin: Writable
+  private motionProcess?: ChildProcessWithoutNullStreams
+  private motionTimeout?: NodeJS.Timeout
+  private lastMotionTime: number | undefined;
+  private log: Logger
 
   constructor(cameraName: string, sessionId: string, videoProcessor: string, ffmpegArgs: string, log: Logger, debug = false, delegate: StreamingDelegate, callback?: StreamRequestCallback) {
+    this.log = log
     log.debug(`Stream command: ${videoProcessor} ${ffmpegArgs}`, cameraName, debug)
 
     let started = false
@@ -129,4 +136,68 @@ export class FfmpegProcess {
       this.process.kill('SIGKILL')
     }, 2 * 1000)
   }
+
+  public startMotionDetection(cameraConfig: CameraConfig, motionDetectedCallback: () => void): void {
+    
+    this.log.info(`Starting motion detection for ${cameraConfig.name}`);
+
+    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.stillImageSource) {
+      return;
+    }
+
+    const rtspUrl = cameraConfig.videoConfig.stillImageSource.split(' ').slice(-1)[0];
+    const cooldownSeconds = cameraConfig.motionCooldown ?? 10;
+
+    const motionArgs = [
+      '-hide_banner',
+      '-rtsp_transport', 'tcp',
+      '-i', rtspUrl,
+      '-vf', "select='gt(scene,0.03)',metadata=print",
+      '-an', '-f', 'null', '-'
+    ];
+
+    this.log.info(`Trying to connect: ffmpeg ${motionArgs}`);
+
+    this.motionProcess = spawn(
+      '/Users/italomoraes/.nvm/versions/node/v20.9.0/lib/node_modules/homebridge-camera-ui/node_modules/ffmpeg-for-homebridge/ffmpeg',
+      motionArgs,
+      { env }
+    );
+
+    this.motionProcess.stderr.on('data', (data) => {
+      const output = data.toString();
+      const match = output.match(/scene_score=([0-9.]+)/);
+      if (match) {
+        const score = parseFloat(match[1]);
+        const now = Date.now();
+
+        if (score > 0.03 && (!this.lastMotionTime || (now - this.lastMotionTime > cooldownSeconds * 1000))) {
+          this.lastMotionTime = now;
+          this.log.info(`[${cameraConfig.name!}] fired: motionDetectedCallback`);
+          motionDetectedCallback();
+        }
+      }
+    });
+
+    this.motionProcess.stdout.on('data', (data) => {
+      const output = data.toString();
+      this.log.warn(`TESTE-OUT: ${output}`);
+      if (output.includes('scene_score')) {
+        motionDetectedCallback();
+      }
+    });
+
+    this.motionProcess.on('close', (code) => {
+      console.log(`Motion detection process exited with code ${code}`);
+      this.motionProcess = undefined;
+    });
+  }
+
+  public stopMotionDetection(): void {
+    if (this.motionProcess) {
+      this.motionProcess.kill('SIGKILL');
+      this.motionProcess = undefined;
+    }
+  }
+
 }

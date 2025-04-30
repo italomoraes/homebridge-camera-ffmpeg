@@ -14,6 +14,8 @@ import { Logger } from './logger.js'
 import { StreamingDelegate } from './streamingDelegate.js'
 import { PLUGIN_NAME, PLATFORM_NAME, MqttAction, getVersion } from './settings.js'
 
+import { FfmpegProcess } from './ffmpeg.js';
+
 const version = getVersion()
 
 export class FfmpegPlatform implements DynamicPlatformPlugin {
@@ -192,6 +194,29 @@ export class FfmpegPlatform implements DynamicPlatformPlugin {
         }
       }
     }
+
+    if (cameraConfig.motionDetection && cameraConfig.videoConfig?.source) {
+      this.log.info('Setting up FFmpeg Motion Detection for camera.', cameraConfig.name);
+
+      const motionDetectionProcess = new FfmpegProcess(
+        cameraConfig.name!,
+        'motion-session', // ID fictício para o processo de motion
+        this.config.videoProcessor || 'ffmpeg',
+        cameraConfig.videoConfig.source,
+        this.log,
+        true, // debug ativo para logs de ffmpeg
+        delegate // pode passar delegate aqui, mas não será usado
+      );
+
+      motionDetectionProcess.startMotionDetection(cameraConfig, () => {
+        this.log.info('Motion detected by FFmpeg.', cameraConfig.name!);
+        this.motionHandler(accessory, true, 10); // 10 segundos de "tempo ativo" do sensor
+      });
+
+      accessory.context.motionFFmpegProcess = motionDetectionProcess;
+    }
+
+
   }
 
   configureAccessory(accessory: PlatformAccessory): void {

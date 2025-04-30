@@ -97,6 +97,18 @@
             "type": "boolean",
             "description": "Exposes the motion sensor for this camera. This can be triggered with the dummy switches, MQTT messages, or via HTTP, depending on what features are enabled in the config."
           },
+          "motionDetection": {
+            "type": "boolean",
+            "title": "Motion Detection",
+            "default": true,
+            "description": "Runs a separate ffmpeg process to watch for movement."
+          },
+          "motionCooldown": {
+            "type": "number",
+            "title": "Tempo de Cooldown para Detecção de Movimento (segundos)",
+            "default": 10,
+            "description": "Tempo mínimo entre detecções consecutivas de movimento."
+          },
           "doorbell": {
             "title": "Enable Doorbell",
             "type": "boolean",
