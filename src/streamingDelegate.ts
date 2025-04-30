@@ -63,19 +63,21 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     const recordingCodecs: AudioRecordingCodec[] = []
 
     const samplerate: AudioRecordingSamplerate[] = []
-    for (const sr of [AudioRecordingSamplerate.KHZ_32]) {
+    for (const sr of [AudioRecordingSamplerate.KHZ_16, AudioRecordingSamplerate.KHZ_24, AudioRecordingSamplerate.KHZ_32, AudioRecordingSamplerate.KHZ_44_1, AudioRecordingSamplerate.KHZ_48]) {
       samplerate.push(sr)
     }
 
-    for (const type of [AudioRecordingCodecType.AAC_LC]) {
+    for (const type of [AudioRecordingCodecType.AAC_LC, AudioRecordingCodecType.AAC_ELD]) {
       const entry: AudioRecordingCodec = {
         type,
         bitrateMode: 0,
         samplerate,
         audioChannels: 1,
+        bitrate: 128 // Adicionar um valor padrão para bitrate
       }
       recordingCodecs.push(entry)
     }
+    
     this.recordingDelegate = this.recording ? new RecordingDelegate(this.log, this.cameraName, this.videoConfig, this.api, this.hap, this.videoProcessor) : null
 
     const options: CameraControllerOptions = {
@@ -114,7 +116,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           ],
         },
       },
-      recording: /*! this.recording ? undefined : */ {
+      recording: this.recording ? {
         options: {
           prebufferLength: PREBUFFER_LENGTH,
           overrideEventTriggerOptions: [hap.EventTriggerOption.MOTION, hap.EventTriggerOption.DOORBELL],
@@ -144,14 +146,17 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           },
           audio: {
             codecs: recordingCodecs,
-
           },
         },
-        delegate: this.recordingDelegate!,
-      },
+        delegate: this.recordingDelegate,
+      } : undefined,
     }
     this.controller = new hap.CameraController(options)
-    // if(this.prebuffer) this.recordingDelegate.startPreBuffer();
+    
+    // Iniciar prebuffer se estiver habilitado
+    if(this.prebuffer && this.recordingDelegate) {
+      this.recordingDelegate.startPreBuffer();
+    }
   }
 
   private determineResolution(request: SnapshotRequest | VideoInfo, isSnapshot: boolean): ResolutionInfo {

@@ -106,11 +106,35 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     return Promise.resolve()
   }
 
-  async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, any, any> {
+  async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, void, unknown> {
     this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.cameraName)
-    // Implement the logic to handle the recording stream request here
-    // For now, just yield an empty RecordingPacket
-    yield {} as RecordingPacket
+    
+    if (!this.videoConfig) {
+      this.log.error('No video configuration for recording', this.cameraName)
+      return
+    }
+
+    const configuration = this.controller?.recordingManagement?.recordingConfiguration
+    if (!configuration) {
+      this.log.error('No recording configuration available', this.cameraName)
+      return
+    }
+
+    try {
+      // Use the handleFragmentsRequests method to get the fragments
+      for await (const fragment of this.handleFragmentsRequests(configuration)) {
+        if (fragment && fragment.length > 0) {
+          // Create the recording packet with the fragment
+          const packet: RecordingPacket = {
+            data: fragment,
+            isLast: false // Set to true for the last packet in the recording
+          }
+          yield packet
+        }
+      }
+    } catch (error) {
+      this.log.error(`Error in recording stream: ${error}`, this.cameraName)
+    }
   }
 
   closeRecordingStream(streamId: number, reason: HDSProtocolSpecificErrorReason | undefined): void {
@@ -132,6 +156,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.log = log
     this.hap = hap
     this.cameraName = cameraName
+    this.videoConfig = videoConfig
     this.videoProcessor = videoProcessor || ffmpegPathString || 'ffmpeg'
 
     api.on(APIEvent.SHUTDOWN, () => {
@@ -232,10 +257,10 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           pending = []
           yield fragment
         }
-        this.log.debug(`mp4 box type ${type} and lenght: ${length}`, this.cameraName)
+        this.log.debug(`mp4 box type ${type} and length: ${length}`, this.cameraName)
       }
     } catch (e) {
-      this.log.info(`Recoding completed. ${e}`, this.cameraName)
+      this.log.info(`Recording completed. ${e}`, this.cameraName)
       /*
             const homedir = require('os').homedir();
             const path = require('path');
@@ -282,7 +307,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
         args.push(...ffmpegInput)
 
-        // args.push(...audioOutputArgs);
+        args.push(...audioOutputArgs);  // Adicionar argumentos de áudio
 
         args.push('-f', 'mp4')
         args.push(...videoOutputArgs)
