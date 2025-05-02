@@ -15,6 +15,9 @@ import { pickPort } from 'pick-port'
 import { FfmpegProcess } from './ffmpeg.js'
 import { RecordingDelegate } from './recordingDelegate.js'
 
+import http from 'node:http';
+import https from 'node:https';
+
 export interface ActiveSession {
   mainProcess?: FfmpegProcess
   returnProcess?: FfmpegProcess
@@ -201,58 +204,81 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     return resInfo
   }
 
-  fetchSnapshot(snapFilter?: string): Promise<Buffer> {
-    this.snapshotPromise = new Promise((resolve, reject) => {
-      const startTime = Date.now()
-      const ffmpegArgs = `${this.videoConfig.stillImageSource || this.videoConfig.source! // Still
-      } -frames:v 1${snapFilter ? ` -filter:v ${snapFilter}` : ''
-      } -f image2 -`
-      + ` -hide_banner`
-      + ` -loglevel error`
+  async fetchSnapshot(snapFilter?: string): Promise<Buffer> {
+    const { stillImageSource, source, debug } = this.videoConfig;
+    const url = stillImageSource || source!;
 
-      this.log.debug(`Snapshot command: ${this.videoProcessor} ${ffmpegArgs}`, this.cameraName, this.videoConfig.debug)
-      const ffmpeg = spawn(this.videoProcessor, ffmpegArgs.split(/\s+/), { env })
-
-      let snapshotBuffer = Buffer.alloc(0)
-      ffmpeg.stdout.on('data', (data) => {
-        snapshotBuffer = Buffer.concat([snapshotBuffer, data])
-      })
-      ffmpeg.on('error', (error: Error) => {
-        reject(new Error(`FFmpeg process creation failed: ${error.message}`))
-      })
-      ffmpeg.stderr.on('data', (data) => {
-        data.toString().split('\n').forEach((line: string) => {
-          if (this.videoConfig.debug && line.length > 0) { // For now only write anything out when debug is set
-            this.log.error(line, `${this.cameraName}] [Snapshot`)
+    // 1) Se for URL HTTP/HTTPS pura, baixa direto
+    if (/^https?:\/\//.test(url)) {
+      return new Promise<Buffer>((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.get(url, { timeout: 5000 }, (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`Failed to fetch snapshot, status code: ${res.statusCode}`));
+            res.resume();
+            return;
           }
-        })
-      })
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          res.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        req.on('error', (err) => reject(new Error(`HTTP snapshot error: ${err.message}`)));
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('HTTP snapshot request timed out'));
+        });
+      });
+    }
+
+    // 2) Senão, usa FFmpeg como antes (ex: para filtros ou RTSP)
+    return new Promise<Buffer>((resolve, reject) => {
+      const startTime = Date.now();
+      const ffmpegArgs = 
+        `${url}` +
+        ` -frames:v 1${snapFilter ? ` -filter:v ${snapFilter}` : ''}` +
+        ` -f image2 - -hide_banner -loglevel error`;
+
+      this.log.debug(`Snapshot command: ${this.videoProcessor} ${ffmpegArgs}`, this.cameraName, debug);
+      const ffmpeg = spawn(this.videoProcessor, ffmpegArgs.split(/\s+/), { env });
+
+      let snapshotBuffer = Buffer.alloc(0);
+      ffmpeg.stdout.on('data', (data) => {
+        snapshotBuffer = Buffer.concat([snapshotBuffer, data]);
+      });
+      ffmpeg.on('error', (error: Error) => {
+        reject(new Error(`FFmpeg process creation failed: ${error.message}`));
+      });
+      ffmpeg.stderr.on('data', (data) => {
+        if (debug) {
+          data.toString().split('\n').forEach(line => {
+            if (line) this.log.error(line, `${this.cameraName}] [Snapshot`);
+          });
+        }
+      });
       ffmpeg.on('close', () => {
         if (snapshotBuffer.length > 0) {
-          resolve(snapshotBuffer)
+          resolve(snapshotBuffer);
         } else {
-          reject(new Error('Failed to fetch snapshot.'))
+          reject(new Error('Failed to fetch snapshot.'));
         }
 
+        // limpa cache após 3s
         setTimeout(() => {
-          this.snapshotPromise = undefined
-        }, 3 * 1000) // Expire cached snapshot after 3 seconds
+          this.snapshotPromise = undefined;
+        }, 3000);
 
-        const runtime = (Date.now() - startTime) / 1000
-        let message = `Fetching snapshot took ${runtime} seconds.`
+        // logging de performance
+        const runtime = (Date.now() - startTime) / 1000;
+        const msg = `Fetching snapshot took ${runtime} seconds.`;
         if (runtime < 5) {
-          this.log.debug(message, this.cameraName, this.videoConfig.debug)
+          this.log.debug(msg, this.cameraName, debug);
+        } else if (runtime < 22) {
+          this.log.warn(msg, this.cameraName);
         } else {
-          if (runtime < 22) {
-            this.log.warn(message, this.cameraName)
-          } else {
-            message += ' The request has timed out and the snapshot has not been refreshed in HomeKit.'
-            this.log.error(message, this.cameraName)
-          }
+          this.log.error(msg + ' The request has timed out and the snapshot has not been refreshed in HomeKit.', this.cameraName);
         }
-      })
-    })
-    return this.snapshotPromise
+      });
+    });
   }
 
   resizeSnapshot(snapshot: Buffer, resizeFilter?: string): Promise<Buffer> {

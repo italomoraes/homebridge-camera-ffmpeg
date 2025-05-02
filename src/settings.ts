@@ -54,7 +54,6 @@ export interface CameraConfig {
   mqtt?: MqttCameraConfig
   videoConfig?: VideoConfig
   motionDetection?: boolean
-  motionCooldown?: number
   motionSensitivity?: number
   videoProcessor?: string
   debug?: boolean
@@ -62,6 +61,7 @@ export interface CameraConfig {
 
 export interface VideoConfig {
   source?: string
+  subSource?: string
   stillImageSource?: string
   returnAudioTarget?: string
   maxStreams?: number

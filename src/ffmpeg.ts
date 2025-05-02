@@ -138,16 +138,16 @@ export class FfmpegProcess {
   }
 
   public startMotionDetection(cameraConfig: CameraConfig, motionDetectedCallback: () => void): void {
-    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.stillImageSource) {
-      this.log.info(`Motion detection not enabled or no still image source for ${cameraConfig.name}`);
+    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.subSource) {
+      this.log.info(`Motion detection not enabled or no sub source for ${cameraConfig.name}`);
       return;
     }
 
     this.log.info(`Starting motion detection for ${cameraConfig.name}`);
 
     // Extrai a URL RTSP da fonte de imagem
-    const rtspUrl = cameraConfig.videoConfig.stillImageSource.split(' ').slice(-1)[0];
-    const cooldownSeconds = cameraConfig.motionCooldown ?? 10;
+    const rtspUrl = cameraConfig.videoConfig.subSource.split(' ').slice(-1)[0];
+    const cooldownSeconds = cameraConfig.motionTimeout ?? 15;
     const sensitivityThreshold = cameraConfig.motionSensitivity ?? 0.03;
 
     // Argumentos para o ffmpeg de detecção de movimento
@@ -159,8 +159,6 @@ export class FfmpegProcess {
       '-vf', `select='gt(scene,${sensitivityThreshold})',metadata=print`,
       '-an', '-f', 'null', '-'
     ];
-
-    this.log.info(`Motion detection command: ${motionArgs.join(' ')}`);
 
     try {
       // Usa o processador de vídeo configurado em vez de um caminho hardcoded

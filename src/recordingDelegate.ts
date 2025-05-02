@@ -186,98 +186,107 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     }
   }
 
-  async * handleFragmentsRequests(configuration: CameraRecordingConfiguration): AsyncGenerator<Buffer, void, unknown> {
-    this.log.debug('video fragments requested', this.cameraName)
+  async *handleFragmentsRequests(configuration: CameraRecordingConfiguration): AsyncGenerator<Buffer, void, unknown> {
+    this.log.debug('video fragments requested', this.cameraName);
 
-    const iframeIntervalSeconds = 4
+    const iframeIntervalSeconds = 4;
 
-    const audioArgs: Array<string> = [
-      '-acodec',
-      'libfdk_aac',
-      ...(configuration.audioCodec.type === AudioRecordingCodecType.AAC_LC
-        ? ['-profile:a', 'aac_low']
-        : ['-profile:a', 'aac_eld']),
-      '-ar',
-      `${configuration.audioCodec.samplerate}k`,
-      '-b:a',
-      `${configuration.audioCodec.bitrate}k`,
-      '-ac',
-      `${configuration.audioCodec.audioChannels}`,
-    ]
-
+    // --- profile e level para H264 ---
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH
       ? 'high'
-      : configuration.videoCodec.parameters.profile === H264Profile.MAIN ? 'main' : 'baseline'
+      : configuration.videoCodec.parameters.profile === H264Profile.MAIN
+        ? 'main'
+        : 'baseline';
 
     const level = configuration.videoCodec.parameters.level === H264Level.LEVEL4_0
       ? '4.0'
-      : configuration.videoCodec.parameters.level === H264Level.LEVEL3_2 ? '3.2' : '3.1'
+      : configuration.videoCodec.parameters.level === H264Level.LEVEL3_2
+        ? '3.2'
+        : '3.1';
 
-    const videoArgs: Array<string> = [
-      '-an',
-      '-sn',
-      '-dn',
-      '-codec:v',
-      'libx264',
-      '-pix_fmt',
-      'yuv420p',
+    const audioArgs = [
+      '-codec:a', 'libfdk_aac',
+      '-b:a', '128k',
+      '-ar', '16k',
+      '-ac', '1'
+    ];
 
-      '-profile:v',
-      profile,
-      '-level:v',
-      level,
-      '-b:v',
-      `${configuration.videoCodec.parameters.bitRate}k`,
-      '-force_key_frames',
-      `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
-      '-r',
-      configuration.videoCodec.resolution[2].toString(),
-    ]
+    const fps = configuration.videoCodec.resolution[2];
+    const interval = iframeIntervalSeconds * fps;
+    const maxWidth = this.videoConfig && this.videoConfig.maxWidth ? this.videoConfig.maxWidth : 0; 
 
-    const ffmpegInput: Array<string> = []
-
-    if (this.videoConfig?.prebuffer) {
-      const input: Array<string> = this.preBuffer ? await this.preBuffer.getVideo(configuration.mediaContainerConfiguration.fragmentLength ?? PREBUFFER_LENGTH) : []
-      ffmpegInput.push(...input)
-    } else {
-      ffmpegInput.push(...(this.videoConfig?.source ?? '').split(' '))
+    const filterArgs: string[] = [];
+    if (maxWidth > 0) {
+      // largura fixa em maxWidth, altura ajustada para manter aspect ratio
+      filterArgs.push('-vf', `scale=${maxWidth}:-2`);
     }
 
-    this.log.debug('Start recording...', this.cameraName)
+    const videoArgs: string[] = [
+      '-sn', '-dn',
+      // ...filterArgs,
+      '-codec:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-profile:v', profile,
+      '-level:v', level,
+      '-b:v', `${configuration.videoCodec.parameters.bitRate}k`,
+      '-force_key_frames', `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
+      '-r', fps.toString(),
+      // '-g', interval.toString(),
+      // '-keyint_min', interval.toString(),
+      // '-force_key_frames',
+      //   `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
+    ];
 
-    const session = await this.startFFMPegFragmetedMP4Session(this.videoProcessor, ffmpegInput, audioArgs, videoArgs)
-    this.log.info('Recording started', this.cameraName)
+    // --- mapeamento de streams para incluir áudio ---
+    const mapArgs = ['-map', '0:v', '-map', '0:a'];
 
-    const { socket, cp, generator } = session
-    let pending: Array<Buffer> = []
-    let filebuffer: Buffer = Buffer.alloc(0)
+    // monta ffmpegInput igual ao seu original
+    const ffmpegInput: string[] = this.videoConfig?.prebuffer
+      ? await this.preBuffer!.getVideo(configuration.mediaContainerConfiguration.fragmentLength ?? PREBUFFER_LENGTH)
+      : (this.videoConfig!.source || '').split(' ');
+
+    this.log.debug('Start recording...', this.cameraName);
+
+    // chama o helper passando mapArgs + audioArgs antes de videoArgs
+    const session = await this.startFFMPegFragmetedMP4Session(
+      this.videoProcessor,
+      ffmpegInput,
+      [...mapArgs, ...audioArgs],
+      videoArgs
+    );
+    this.log.info('Recording started', this.cameraName);
+
+    // resto do generator igual ao que você já tinha
+    const { socket, cp, generator } = session;
+    let ffmpegExited = false;
+    cp.once('exit', () => {
+      ffmpegExited = true;
+    });
+    let pending: Buffer[] = [];
+    let filebuffer = Buffer.alloc(0);
+
     try {
       for await (const box of generator) {
-        const { header, type, length, data } = box
-
-        pending.push(header, data)
+        if (ffmpegExited) {
+          this.log.debug('FFmpeg exit detected — stopping fragment loop', this.cameraName);
+          break;
+        }
+        const { header, type, data } = box;
+        pending.push(header, data);
 
         if (type === 'moov' || type === 'mdat') {
-          const fragment = Buffer.concat(pending)
-          filebuffer = Buffer.concat([filebuffer, Buffer.concat(pending)])
-          pending = []
-          yield fragment
+          const fragment = Buffer.concat(pending);
+          filebuffer = Buffer.concat([filebuffer, fragment]);
+          pending = [];
+          yield fragment;
         }
-        this.log.debug(`mp4 box type ${type} and length: ${length}`, this.cameraName)
+        this.log.debug(`mp4 box type ${type}`, this.cameraName);
       }
     } catch (e) {
-      this.log.info(`Recording completed. ${e}`, this.cameraName)
-      /*
-            const homedir = require('os').homedir();
-            const path = require('path');
-            const writeStream = fs.createWriteStream(homedir+path.sep+Date.now()+'_video.mp4');
-            writeStream.write(filebuffer);
-            writeStream.end();
-            */
+      this.log.info(`Recording completed with error: ${e}`, this.cameraName);
     } finally {
-      socket.destroy()
-      cp.kill()
-      // this.server.close;
+      socket.destroy();
+      cp.kill();
     }
   }
 
@@ -308,12 +317,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         })
       })
 
+      const stderrChunks: Buffer[] = [];
+
       listenServer(server, this.log).then((serverPort) => {
         const args: Array<string> = []
 
         args.push(...ffmpegInput)
 
-        args.push(...audioOutputArgs);  // Adicionar argumentos de áudio
+        args.push(...audioOutputArgs);
 
         args.push('-f', 'mp4')
         args.push(...videoOutputArgs)
@@ -331,6 +342,23 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         const stdioValue = debug ? 'pipe' : 'ignore'
         this.process = spawn(ffmpegPath, args, { env, stdio: stdioValue })
         const cp = this.process
+
+        if (cp.stderr) {
+          cp.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+        }
+
+        cp.on('exit', (code: number | null, signal: string | null) => {
+          const stderr = Buffer.concat(stderrChunks).toString();
+          const reason = code && code !== 0
+            ? `ffmpeg exit code ${code}` + (signal ? `, signal ${signal}` : '')
+            : signal
+              ? `killed by signal ${signal}`
+              : undefined;
+
+          if (reason) {
+            this.log.error(reason + '\n' + stderr);
+          }
+        });
 
         if (debug) {
           if (cp.stdout) {
