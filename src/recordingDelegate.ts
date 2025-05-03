@@ -96,25 +96,150 @@ export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP
 }
 
 export class RecordingDelegate implements CameraRecordingDelegate {
-  updateRecordingActive(active: boolean): Promise<void> {
-    this.log.info(`Recording active status changed to: ${active}`, this.cameraName)
-    return Promise.resolve()
+  async updateRecordingActive(active: boolean): Promise<void> {
+    this.log.info(`Recording active status changed to: ${active}`, this.cameraName);
+    
+    if (active) {
+      // Iniciar ou garantir que o pré-buffer esteja funcionando quando a gravação está ativa
+      await this.startPreBuffer();
+      
+      // Se necessário, inicialize outros recursos para gravação
+      this.isRecordingActive = true;
+    } else {
+      // A gravação não está mais ativa
+      this.isRecordingActive = false;
+      
+      // Limpeza dos recursos de gravação, exceto se o pré-buffer deva continuar rodando
+      if (this.activeRecordingSessions.size === 0 && !this.videoConfig?.prebuffer) {
+        // Se não houver sessões ativas e o pré-buffer não estiver configurado para continuar,
+        // podemos limpar os recursos
+        if (this.preBufferSession) {
+          this.log.debug('Stopping prebuffer session as recording is inactive', this.cameraName);
+          if (this.preBufferSession.process) {
+            this.preBufferSession.process.kill();
+          }
+          if (this.preBufferSession.server) {
+            this.preBufferSession.server.close();
+          }
+          this.preBufferSession = undefined;
+        }
+      }
+    }
+    
+    return Promise.resolve();
   }
 
-  updateRecordingConfiguration(): Promise<void> {
-    this.log.info('Recording configuration updated', this.cameraName)
-    return Promise.resolve()
+  async updateRecordingConfiguration(configuration: CameraRecordingConfiguration): Promise<void> {
+    this.log.info('Recording configuration updated', this.cameraName);
+    
+    // Armazene a configuração para uso em outras funções
+    this.recordingConfiguration = configuration;
+    
+    if (configuration) {
+      this.log.debug(`Audio codec: ${configuration.audioCodec.type}, ` +
+        `Video resolution: ${configuration.videoCodec.resolution[0]}x${configuration.videoCodec.resolution[1]} @ ${configuration.videoCodec.resolution[2]}fps`, 
+        this.cameraName);
+      
+      // Se a gravação estiver ativa, podemos precisar reiniciar o pré-buffer com as novas configurações
+      if (this.isRecordingActive && this.videoConfig?.prebuffer) {
+        // Reinicia o pré-buffer com as novas configurações, se necessário
+        await this.restartPreBuffer();
+      }
+    }
+    
+    return Promise.resolve();
   }
 
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, any, any> {
-    this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.cameraName)
-    // Implement the logic to handle the recording stream request here
-    // For now, just yield an empty RecordingPacket
-    yield {} as RecordingPacket
+    this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.cameraName);
+    
+    if (!this.videoConfig) {
+      this.log.error('Video configuration is missing', this.cameraName);
+      return;
+    }
+
+    try {
+      // Start prebuffer if configured
+      await this.startPreBuffer();
+      
+      // Get the recording configuration from the controller
+      const recordingConfiguration = this.recordingConfiguration;
+      
+      if (!recordingConfiguration) {
+        this.log.error('Recording configuration not available', this.cameraName);
+        return;
+      }
+      
+      // Generate fragments
+      const fragmentsGenerator = this.handleFragmentsRequests(recordingConfiguration);
+      
+      // Process each fragment and convert to RecordingPacket
+      for await (const fragment of fragmentsGenerator) {
+        const packet: RecordingPacket = {
+          data: fragment,
+          isLast: false
+        };
+        
+        // Track the latest active session info
+        if (this.process) {
+          const currentSession = {
+            cp: this.process
+          };
+          this.activeRecordingSessions.set(streamId, currentSession);
+        }
+        
+        yield packet;
+      }
+      
+      // Send final packet
+      yield {
+        data: Buffer.alloc(0),
+        isLast: true
+      };
+      
+      // Remove from active sessions when complete
+      this.activeRecordingSessions.delete(streamId);
+      
+    } catch (error) {
+      this.log.error(`Error handling recording stream: ${error}`, this.cameraName);
+      
+      // Clean up in case of error
+      this.activeRecordingSessions.delete(streamId);
+      
+      // Send final packet in case of error
+      yield {
+        data: Buffer.alloc(0),
+        isLast: true
+      };
+    }
   }
 
   closeRecordingStream(streamId: number, reason: HDSProtocolSpecificErrorReason | undefined): void {
-    this.log.info(`Recording stream closed for stream ID: ${streamId}, reason: ${reason}`, this.cameraName)
+    this.log.info(`Recording stream closed for stream ID: ${streamId}, reason: ${reason ?? 'unknown'}`, this.cameraName);
+    
+    try {
+      // Clean up any active recording sessions
+      if (this.activeRecordingSessions && this.activeRecordingSessions.has(streamId)) {
+        const session = this.activeRecordingSessions.get(streamId);
+        if (session && session.cp) {
+          // Matar o processo FFmpeg associado
+          this.log.debug('Terminating FFmpeg process for recording', this.cameraName);
+          session.cp.kill('SIGKILL');
+        }
+        
+        // Remove from active sessions
+        this.activeRecordingSessions.delete(streamId);
+        this.log.debug(`Removed recording session for stream ID: ${streamId}`, this.cameraName);
+      }
+      
+      // If this was the last active recording, we might want to stop the prebuffer
+      if (this.activeRecordingSessions && this.activeRecordingSessions.size === 0 && !this.isRecordingActive) {
+        this.log.debug('No active recording sessions remaining and recording is not active', this.cameraName);
+        // Optionally stop prebuffer here if needed
+      }
+    } catch (error) {
+      this.log.error(`Error closing recording stream: ${error}`, this.cameraName);
+    }
   }
 
   private readonly hap: HAP
@@ -128,11 +253,18 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   private preBufferSession?: Mp4Session
   private preBuffer?: PreBuffer
 
+  private activeRecordingSessions: Map<number, {
+    cp?: ChildProcess;
+  }> = new Map();
+  private recordingConfiguration?: CameraRecordingConfiguration;
+  private isRecordingActive = false;
+
   constructor(log: Logger, cameraName: string, videoConfig: VideoConfig, api: API, hap: HAP, videoProcessor?: string) {
     this.log = log
     this.hap = hap
     this.cameraName = cameraName
     this.videoProcessor = videoProcessor || ffmpegPathString || 'ffmpeg'
+    this.videoConfig = videoConfig
 
     api.on(APIEvent.SHUTDOWN, () => {
       if (this.preBufferSession) {
@@ -153,6 +285,29 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         }
       }
     }
+  }
+
+  private async restartPreBuffer(): Promise<void> {
+    this.log.debug('Restarting prebuffer with new configuration', this.cameraName);
+    
+    // Primeiro pare qualquer sessão de pré-buffer existente
+    if (this.preBufferSession) {
+      if (this.preBufferSession.process) {
+        this.preBufferSession.process.kill();
+      }
+      if (this.preBufferSession.server) {
+        this.preBufferSession.server.close();
+      }
+      this.preBufferSession = undefined;
+    }
+    
+    // Reinicializar o pré-buffer
+    if (this.preBuffer) {
+      this.preBuffer = undefined; // Isso forçará a criação de um novo objeto PreBuffer
+    }
+    
+    // Iniciar um novo pré-buffer
+    await this.startPreBuffer();
   }
 
   async * handleFragmentsRequests(configuration: CameraRecordingConfiguration): AsyncGenerator<Buffer, void, unknown> {
