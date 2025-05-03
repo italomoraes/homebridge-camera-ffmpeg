@@ -104,10 +104,12 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
   public async updateRecordingConfiguration(configuration: CameraRecordingConfiguration): Promise<void> {
     this.log.info('Recording configuration updated', this.cameraName);
-    this.recordingConfiguration = configuration;   // guarda p/ uso posterior
+    this.recordingConfiguration = configuration;
+    return Promise.resolve()
   }
 
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, void, unknown> {
+    this.streamId = streamId;
     this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.cameraName)
     
     if (!this.videoConfig) {
@@ -157,6 +159,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   private preBufferSession?: Mp4Session
   private preBuffer?: PreBuffer
   private recordingConfiguration?: CameraRecordingConfiguration;
+  private streamId?: number;
 
   constructor(log: Logger, cameraName: string, videoConfig: VideoConfig, api: API, hap: HAP, videoProcessor?: string) {
     this.log = log
@@ -223,7 +226,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
     const videoArgs: string[] = [
       '-sn', '-dn',
-      // ...filterArgs,
+      ...filterArgs,
       '-codec:v', 'libx264',
       '-pix_fmt', 'yuv420p',
       '-profile:v', profile,
@@ -231,10 +234,10 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       '-b:v', `${configuration.videoCodec.parameters.bitRate}k`,
       '-force_key_frames', `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
       '-r', fps.toString(),
-      // '-g', interval.toString(),
-      // '-keyint_min', interval.toString(),
-      // '-force_key_frames',
-      //   `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
+      '-g', interval.toString(),
+      '-keyint_min', interval.toString(),
+      '-force_key_frames',
+        `expr:eq(t,n_forced*${iframeIntervalSeconds})`,
     ];
 
     // --- mapeamento de streams para incluir áudio ---
