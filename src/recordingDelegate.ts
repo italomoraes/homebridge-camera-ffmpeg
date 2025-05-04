@@ -24,9 +24,11 @@ export async function listenServer(server: Server, log: Logger): Promise<number>
   let isListening = false
   while (!isListening) {
     const port = 10000 + Math.round(Math.random() * 30000)
+    log.debug(`listenServer: tentando ouvir na porta ${port}`);
     server.listen(port)
     try {
       await once(server, 'listening')
+      log.debug(`listenServer: agora ouvindo na porta ${port}`);
       isListening = true
       const address = server.address()
       if (address && typeof address === 'object' && 'port' in address) {
@@ -338,7 +340,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       : configuration.videoCodec.parameters.level === H264Level.LEVEL3_2 ? '3.2' : '3.1'
 
     const videoArgs: Array<string> = [
-      '-an',
+      // '-an',
       '-sn',
       '-dn',
       '-codec:v',
@@ -375,6 +377,8 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     const { socket, cp, generator } = session
     let pending: Array<Buffer> = []
     let filebuffer: Buffer = Buffer.alloc(0)
+    let fragmentCount = 0;
+    
     try {
       for await (const box of generator) {
         const { header, type, length, data } = box
@@ -385,20 +389,27 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           const fragment = Buffer.concat(pending)
           filebuffer = Buffer.concat([filebuffer, Buffer.concat(pending)])
           pending = []
+          fragmentCount++;
           yield fragment
         }
         this.log.debug(`mp4 box type ${type} and lenght: ${length}`, this.cameraName)
       }
     } catch (e) {
-      this.log.info(`Recoding completed. ${e}`, this.cameraName)
-      /*
-            const homedir = require('os').homedir();
-            const path = require('path');
-            const writeStream = fs.createWriteStream(homedir+path.sep+Date.now()+'_video.mp4');
-            writeStream.write(filebuffer);
-            writeStream.end();
-            */
+      if (e instanceof Error) {
+        this.log.info(`Recording completed or encountered an error: ${e.message}`, this.cameraName);
+        
+        // Se não enviamos nenhum fragmento e temos dados pendentes, tente enviar o que temos
+        if (fragmentCount === 0 && pending.length > 0) {
+          this.log.warn('No fragments sent yet, trying to send pending data', this.cameraName);
+          const lastResortFragment = Buffer.concat(pending);
+          yield lastResortFragment;
+        }
+        
+      } else {
+        this.log.info(`Recording completed or encountered an unknown error`, this.cameraName);
+      }
     } finally {
+      this.log.debug(`Recording session ended. Total fragments sent: ${fragmentCount}`, this.cameraName);
       socket.destroy()
       cp.kill()
       // this.server.close;
@@ -406,29 +417,66 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }
 
   async startFFMPegFragmetedMP4Session(ffmpegPath: string, ffmpegInput: Array<string>, audioOutputArgs: Array<string>, videoOutputArgs: Array<string>): Promise<FFMpegFragmentedMP4Session> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      this.log.debug(`server: callback de connection em ${new Date().toISOString()}`, this.cameraName);
       const server = createServer((socket) => {
         server.close()
-        async function* generator(): AsyncGenerator<MP4Atom> {
-          while (true) {
-            const header = await readLength(socket, 8)
-            const length = header.readInt32BE(0) - 8
-            const type = header.slice(4).toString()
-            const data = await readLength(socket, length)
-
-            yield {
-              header,
-              length,
-              type,
-              data,
+        this.log.debug('Client connected to socket server', this.cameraName);
+        // Handle socket errors
+        socket.on('error', (err) => {
+          this.log.debug(`Socket error: ${err}`, this.cameraName);
+        });
+        
+        socket.on('end', () => {
+          this.log.debug('Socket ended by remote peer', this.cameraName);
+        });
+        
+        socket.on('close', (hadError) => {
+          this.log.debug(`Socket closed ${hadError ? 'with' : 'without'} error`, this.cameraName);
+        });
+        
+        const generatorFunction = async function* (this: any): AsyncGenerator<MP4Atom> {
+          this.log.debug(`generator: iniciando leitura em ${new Date().toISOString()}`, this.cameraName);
+          try {
+            while (true) {
+              const header = await readLength(socket, 8);
+              if (!header || header.length < 8) {
+                this.log.error(`Invalid header received: ${header ? header.length : 'null'} bytes`, this.cameraName);
+                throw new Error('Invalid MP4 box header received');
+              }
+              
+              const length = header.readInt32BE(0) - 8;
+              const type = header.slice(4).toString();
+              
+              this.log.debug(`Received MP4 box of type: ${type}, length: ${length + 8}`, this.cameraName);
+              
+              if (length < 0) {
+                this.log.error(`Invalid box length: ${length}`, this.cameraName);
+                throw new Error(`Invalid MP4 box length: ${length}`);
+              }
+              
+              const data = await readLength(socket, length);
+              
+              yield {
+                header,
+                length,
+                type,
+                data,
+              }
             }
+          } catch (error) {
+            this.log.error(`Error in MP4 generator: ${error}`, this.cameraName);
+            throw error; // Re-throw to be caught in the handling code
           }
-        }
-        const cp = this.process
+        };
+        
+        const cp = this.process;
+        const generatorBound = generatorFunction.bind(this); // Bind 'this' to access logger
+        
         resolve({
           socket,
           cp,
-          generator: generator(),
+          generator: generatorBound(),
         })
       })
 
@@ -437,6 +485,8 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
         args.push(...ffmpegInput)
 
+        // audio args making recording fail
+        // Audio is still available after removing -an from video args
         // args.push(...audioOutputArgs);
 
         args.push('-f', 'mp4')
@@ -464,7 +514,11 @@ export class RecordingDelegate implements CameraRecordingDelegate {
             cp.stderr.on('data', (data: Buffer) => this.log.debug(data.toString(), this.cameraName))
           }
         }
-      })
-    })
+      }).catch(err => {
+        this.log.error(`Failed to start FFmpeg server: ${err}`, this.cameraName);
+        reject(err);
+      });
+    });
   }
+
 }

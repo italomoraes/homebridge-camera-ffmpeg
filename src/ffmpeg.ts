@@ -131,6 +131,7 @@ export class FfmpegProcess {
   }
 
   public stop(): void {
+    this.stopMotionDetection();
     this.process.stdin.write(`q${os.EOL}`)
     this.killTimeout = setTimeout(() => {
       this.process.kill('SIGKILL')
@@ -138,17 +139,19 @@ export class FfmpegProcess {
   }
 
   public startMotionDetection(cameraConfig: CameraConfig, motionDetectedCallback: () => void): void {
-    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.subSource) {
-      this.log.info(`Motion detection not enabled or no sub source for ${cameraConfig.name}`);
+    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.subSource || !cameraConfig.videoConfig?.source) {
+      this.log.info(`Motion detection not enabled or no sources`, cameraConfig.name);
       return;
     }
 
-    this.log.info(`Starting motion detection for ${cameraConfig.name}`);
+    const videoSource = cameraConfig.videoConfig.subSource ?? cameraConfig.videoConfig.source;
+
+    this.log.info(`Starting motion detection`, cameraConfig.name);
 
     // Extrai a URL RTSP da fonte de imagem
-    const rtspUrl = cameraConfig.videoConfig.subSource.split(' ').slice(-1)[0];
-    const cooldownSeconds = cameraConfig.motionTimeout ?? 15;
-    const sensitivityThreshold = cameraConfig.motionSensitivity ?? 0.03;
+    const rtspUrl = videoSource.split(' ').slice(-1)[0];
+    const cooldownSeconds = cameraConfig.motionTimeout ?? 15; // default for motionTimeout
+    const sensitivityThreshold = cameraConfig.motionSensitivity ?? 0.03; // default medium
 
     // Argumentos para o ffmpeg de detecção de movimento
     const motionArgs = [
@@ -160,7 +163,7 @@ export class FfmpegProcess {
       '-an', '-f', 'null', '-'
     ];
 
-    this.log.info(`Motion detection command: ${motionArgs.join(' ')}`);
+    this.log.debug(`Motion detection command: ${motionArgs.join(' ')}`);
 
     try {
       // Usa o processador de vídeo configurado em vez de um caminho hardcoded
@@ -182,7 +185,7 @@ export class FfmpegProcess {
           if (score > sensitivityThreshold && 
               (!this.lastMotionTime || (now - this.lastMotionTime > cooldownSeconds * 1000))) {
             this.lastMotionTime = now;
-            this.log.info(`Motion detected for ${cameraConfig.name} with score ${score}`);
+            this.log.info(`Motion detected for with score ${score}`, cameraConfig.name);
             motionDetectedCallback();
           }
         }
