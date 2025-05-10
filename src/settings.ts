@@ -54,6 +54,7 @@ export interface CameraConfig {
   mqtt?: MqttCameraConfig
   videoConfig?: VideoConfig
   motionDetection?: boolean
+  ffmpegMotionDetection?: boolean
   motionSensitivity?: number
   videoProcessor?: string
   debug?: boolean

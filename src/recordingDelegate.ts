@@ -409,7 +409,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         this.log.info(`Recording completed or encountered an unknown error`, this.cameraName);
       }
     } finally {
-      this.log.debug(`Recording session ended. Total fragments sent: ${fragmentCount}`, this.cameraName);
+      this.log.info(`Recording session ended. Total fragments sent: ${fragmentCount}`, this.cameraName);
       socket.destroy()
       cp.kill()
       // this.server.close;

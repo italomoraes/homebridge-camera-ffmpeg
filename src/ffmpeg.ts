@@ -139,12 +139,12 @@ export class FfmpegProcess {
   }
 
   public startMotionDetection(cameraConfig: CameraConfig, motionDetectedCallback: () => void): void {
-    if (!cameraConfig.motionDetection || !cameraConfig.videoConfig?.subSource || !cameraConfig.videoConfig?.source) {
+    if (!cameraConfig.ffmpegMotionDetection || !cameraConfig.videoConfig?.subSource || !cameraConfig.videoConfig?.source) {
       this.log.info(`Motion detection not enabled or no sources`, cameraConfig.name);
       return;
     }
 
-    const videoSource = cameraConfig.videoConfig.subSource ?? cameraConfig.videoConfig.source;
+    const videoSource = cameraConfig.videoConfig.source ?? cameraConfig.videoConfig.subSource;
 
     this.log.info(`Starting motion detection`, cameraConfig.name);
 

@@ -195,7 +195,7 @@ export class FfmpegPlatform implements DynamicPlatformPlugin {
       }
     }
 
-    if (cameraConfig.motionDetection && cameraConfig.videoConfig?.stillImageSource) {
+    if (cameraConfig.ffmpegMotionDetection && cameraConfig.videoConfig?.stillImageSource) {
       this.log.info('Setting up FFmpeg Motion Detection for camera.', cameraConfig.name);
       
       // Configure o videoProcessor corretamente para usar o binário apropriado
