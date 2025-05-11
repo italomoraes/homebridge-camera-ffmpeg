@@ -68,7 +68,11 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
     const e = (): void => {
       // eslint-disable-next-line ts/no-use-before-define
       cleanup()
-      reject(new Error(`stream ended during read for minimum ${length} bytes`))
+      // Instead of rejecting, which could crash Homebridge, we should resolve with an empty buffer
+      // and handle this empty buffer in the consuming code
+      resolve(Buffer.alloc(0))
+      // Log error instead of rejecting with it
+      console.log(`Stream ended during read for minimum ${length} bytes`)
     }
 
     const cleanup = (): void => {
@@ -83,16 +87,35 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
 
 export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP4Atom> {
   while (true) {
-    const header = await readLength(readable, 8)
-    const length = header.readInt32BE(0) - 8
-    const type = header.slice(4).toString()
-    const data = await readLength(readable, length)
+    try {
+      const header = await readLength(readable, 8)
 
-    yield {
-      header,
-      length,
-      type,
-      data,
+      // Check if header is empty (stream ended)
+      if (!header || header.length === 0) {
+        console.log('Stream ended during fragmentedMP4 parse')
+        return
+      }
+
+      const length = header.readInt32BE(0) - 8
+      const type = header.slice(4).toString()
+
+      const data = await readLength(readable, length)
+
+      // Check if data is empty (stream ended)
+      if (!data || data.length === 0) {
+        console.log('Stream ended during fragmentedMP4 data read')
+        return
+      }
+
+      yield {
+        header,
+        length,
+        type,
+        data,
+      }
+    } catch (error) {
+      console.log(`Error in parseFragmentedMP4: ${error}`)
+      return // End generator instead of throwing
     }
   }
 }
@@ -417,7 +440,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }
 
   async startFFMPegFragmetedMP4Session(ffmpegPath: string, ffmpegInput: Array<string>, audioOutputArgs: Array<string>, videoOutputArgs: Array<string>): Promise<FFMpegFragmentedMP4Session> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       this.log.debug(`server: callback de connection em ${new Date().toISOString()}`, this.cameraName);
       const server = createServer((socket) => {
         server.close()
@@ -426,37 +449,49 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         socket.on('error', (err) => {
           this.log.debug(`Socket error: ${err}`, this.cameraName);
         });
-        
+
         socket.on('end', () => {
           this.log.debug('Socket ended by remote peer', this.cameraName);
         });
-        
+
         socket.on('close', (hadError) => {
           this.log.debug(`Socket closed ${hadError ? 'with' : 'without'} error`, this.cameraName);
         });
-        
+
         const generatorFunction = async function* (this: any): AsyncGenerator<MP4Atom> {
           this.log.debug(`generator: iniciando leitura em ${new Date().toISOString()}`, this.cameraName);
           try {
             while (true) {
-              const header = await readLength(socket, 8);
-              if (!header || header.length < 8) {
-                this.log.error(`Invalid header received: ${header ? header.length : 'null'} bytes`, this.cameraName);
-                throw new Error('Invalid MP4 box header received');
+              let header;
+              try {
+                header = await readLength(socket, 8);
+                if (!header || header.length < 8) {
+                  this.log.error(`Invalid header received: ${header ? header.length : 'null'} bytes`, this.cameraName);
+                  return; // End generator instead of throwing
+                }
+              } catch (error) {
+                this.log.debug(`Stream ended while reading header: ${error}`, this.cameraName);
+                return; // End generator instead of throwing
               }
-              
+
               const length = header.readInt32BE(0) - 8;
               const type = header.slice(4).toString();
-              
+
               this.log.debug(`Received MP4 box of type: ${type}, length: ${length + 8}`, this.cameraName);
-              
+
               if (length < 0) {
                 this.log.error(`Invalid box length: ${length}`, this.cameraName);
-                throw new Error(`Invalid MP4 box length: ${length}`);
+                return; // End generator instead of throwing
               }
-              
-              const data = await readLength(socket, length);
-              
+
+              let data;
+              try {
+                data = await readLength(socket, length);
+              } catch (error) {
+                this.log.debug(`Stream ended while reading data: ${error}`, this.cameraName);
+                return; // End generator instead of throwing
+              }
+
               yield {
                 header,
                 length,
@@ -466,13 +501,13 @@ export class RecordingDelegate implements CameraRecordingDelegate {
             }
           } catch (error) {
             this.log.error(`Error in MP4 generator: ${error}`, this.cameraName);
-            throw error; // Re-throw to be caught in the handling code
+            // Don't re-throw, just end the generator
           }
         };
-        
+
         const cp = this.process;
         const generatorBound = generatorFunction.bind(this); // Bind 'this' to access logger
-        
+
         resolve({
           socket,
           cp,
@@ -516,7 +551,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         }
       }).catch(err => {
         this.log.error(`Failed to start FFmpeg server: ${err}`, this.cameraName);
-        reject(err);
+        // No reject here, to prevent crashing Homebridge
       });
     });
   }
