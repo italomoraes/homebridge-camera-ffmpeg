@@ -547,6 +547,6 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       }
     }
     this.ongoingSessions.delete(sessionId)
-    this.log.info('Stopped video stream.', this.cameraName)
+    // this.log.info('Stopped video stream.', this.cameraName)
   }
 }

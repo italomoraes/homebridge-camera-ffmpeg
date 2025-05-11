@@ -98,8 +98,6 @@ export class PreBuffer {
     args.push(...this.ffmpegInput.split(' '))
     args.push(...ffmpegOutput)
 
-    this.log.info(`${this.ffmpegPath} ${args.join(' ')}`, this.cameraName)
-
     const debug = false
 
     const stdioValue = debug ? 'pipe' : 'ignore'
