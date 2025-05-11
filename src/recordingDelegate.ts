@@ -55,7 +55,15 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
     }
   }
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    // Add a timeout to prevent hanging forever waiting for data
+    const timeout = setTimeout(() => {
+      // eslint-disable-next-line ts/no-use-before-define
+      cleanup()
+      resolve(Buffer.alloc(0))
+      console.log(`Timeout waiting for stream data (${length} bytes)`)
+    }, 10000) // 10 second timeout
+
     const r = (): void => {
       const ret = readable.read(length)
       if (ret) {
@@ -76,6 +84,7 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
     }
 
     const cleanup = (): void => {
+      clearTimeout(timeout)
       readable.removeListener('readable', r)
       readable.removeListener('end', e)
     }
@@ -85,14 +94,18 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
   })
 }
 
-export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP4Atom> {
+export async function* parseFragmentedMP4(readable: Readable, log?: Logger, cameraName?: string): AsyncGenerator<MP4Atom> {
+  let logFunction = log
+    ? (msg: string) => log.debug(msg, cameraName)
+    : (msg: string) => console.log(msg);
+
   while (true) {
     try {
       const header = await readLength(readable, 8)
 
       // Check if header is empty (stream ended)
       if (!header || header.length === 0) {
-        console.log('Stream ended during fragmentedMP4 parse')
+        logFunction('Stream ended during fragmentedMP4 parse')
         return
       }
 
@@ -103,7 +116,7 @@ export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP
 
       // Check if data is empty (stream ended)
       if (!data || data.length === 0) {
-        console.log('Stream ended during fragmentedMP4 data read')
+        logFunction('Stream ended during fragmentedMP4 data read')
         return
       }
 
@@ -114,7 +127,7 @@ export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP
         data,
       }
     } catch (error) {
-      console.log(`Error in parseFragmentedMP4: ${error}`)
+      logFunction(`Error in parseFragmentedMP4: ${error}`)
       return // End generator instead of throwing
     }
   }
@@ -177,34 +190,81 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket, any, any> {
     this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.cameraName);
-    
+
     if (!this.videoConfig) {
       this.log.error('Video configuration is missing', this.cameraName);
       return;
     }
 
+    // If there's an existing recording session for this ID, clean it up first
+    if (this.activeRecordingSessions.has(streamId)) {
+      this.log.warn(`Found stale recording session for stream ID: ${streamId}, cleaning up`, this.cameraName);
+      const oldSession = this.activeRecordingSessions.get(streamId);
+      if (oldSession && oldSession.cp) {
+        try {
+          oldSession.cp.kill('SIGKILL');
+        } catch (e) {
+          // Ignore errors when killing old process
+        }
+      }
+      this.activeRecordingSessions.delete(streamId);
+    }
+
+    // Flag to track if this stream has been closed
+    let isStreamClosed = false;
+
+    // Setup a listener to detect when this stream is closed
+    const closeHandler = () => {
+      isStreamClosed = true;
+      this.log.debug(`Stream close detected for stream ID: ${streamId}`, this.cameraName);
+    };
+
+    // Add this stream ID to a tracking map
+    this._streamCloseHandlers = this._streamCloseHandlers || new Map();
+
+    // Clean up any existing handler first
+    if (this._streamCloseHandlers.has(streamId)) {
+      this._streamCloseHandlers.delete(streamId);
+    }
+
+    this._streamCloseHandlers.set(streamId, closeHandler);
+
+    // Set up a watchdog timer to force stream closure after a timeout
+    const streamTimeout = setTimeout(() => {
+      if (!isStreamClosed && this._streamCloseHandlers && this._streamCloseHandlers.has(streamId)) {
+        this.log.warn(`Stream ${streamId} watchdog timeout triggered, forcing cleanup`, this.cameraName);
+        closeHandler();
+      }
+    }, 90000); // 90 second watchdog (typical recordings are about 60 seconds)
+
     try {
       // Start prebuffer if configured
       await this.startPreBuffer();
-      
+
       // Get the recording configuration from the controller
       const recordingConfiguration = this.recordingConfiguration;
-      
+
       if (!recordingConfiguration) {
         this.log.error('Recording configuration not available', this.cameraName);
         return;
       }
-      
+
       // Generate fragments
       const fragmentsGenerator = this.handleFragmentsRequests(recordingConfiguration);
-      
+
       // Process each fragment and convert to RecordingPacket
       for await (const fragment of fragmentsGenerator) {
+        // Check if stream has been closed
+        if (isStreamClosed) {
+          this.log.debug(`Stopping fragment generation as stream ${streamId} is closed`, this.cameraName);
+          break;
+        }
+
         const packet: RecordingPacket = {
           data: fragment,
           isLast: false
         };
-        
+
         // Track the latest active session info
         if (this.process) {
           const currentSession = {
@@ -212,37 +272,67 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           };
           this.activeRecordingSessions.set(streamId, currentSession);
         }
-        
+
         yield packet;
       }
-      
+
       // Send final packet
       yield {
         data: Buffer.alloc(0),
         isLast: true
       };
-      
+
       // Remove from active sessions when complete
       this.activeRecordingSessions.delete(streamId);
-      
+
     } catch (error) {
       this.log.error(`Error handling recording stream: ${error}`, this.cameraName);
-      
+
       // Clean up in case of error
       this.activeRecordingSessions.delete(streamId);
-      
+
       // Send final packet in case of error
       yield {
         data: Buffer.alloc(0),
         isLast: true
       };
+    } finally {
+      // Clean up all resources
+      clearTimeout(streamTimeout);
+
+      // Clean up our close handler
+      if (this._streamCloseHandlers) {
+        this._streamCloseHandlers.delete(streamId);
+      }
+
+      // Ensure process is killed if it's still running
+      if (this.activeRecordingSessions.has(streamId)) {
+        const session = this.activeRecordingSessions.get(streamId);
+        if (session && session.cp) {
+          try {
+            session.cp.kill('SIGKILL');
+          } catch (e) {
+            // Ignore errors when killing process
+          }
+        }
+        this.activeRecordingSessions.delete(streamId);
+      }
     }
   }
 
   closeRecordingStream(streamId: number, reason: HDSProtocolSpecificErrorReason | undefined): void {
     this.log.info(`Recording stream closed for stream ID: ${streamId}, reason: ${reason ?? 'unknown'}`, this.cameraName);
-    
+
     try {
+      // Signal that this stream has been closed to any active generators
+      if (this._streamCloseHandlers && this._streamCloseHandlers.has(streamId)) {
+        const closeHandler = this._streamCloseHandlers.get(streamId);
+        if (closeHandler) {
+          closeHandler();
+          this.log.debug(`Triggered close handler for stream ID: ${streamId}`, this.cameraName);
+        }
+      }
+
       // Clean up any active recording sessions
       if (this.activeRecordingSessions && this.activeRecordingSessions.has(streamId)) {
         const session = this.activeRecordingSessions.get(streamId);
@@ -251,12 +341,12 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           this.log.debug('Terminating FFmpeg process for recording', this.cameraName);
           session.cp.kill('SIGKILL');
         }
-        
+
         // Remove from active sessions
         this.activeRecordingSessions.delete(streamId);
         this.log.debug(`Removed recording session for stream ID: ${streamId}`, this.cameraName);
       }
-      
+
       // If this was the last active recording, we might want to stop the prebuffer
       if (this.activeRecordingSessions && this.activeRecordingSessions.size === 0 && !this.isRecordingActive) {
         this.log.debug('No active recording sessions remaining and recording is not active', this.cameraName);
@@ -283,6 +373,8 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }> = new Map();
   private recordingConfiguration?: CameraRecordingConfiguration;
   private isRecordingActive = false;
+  // TypeScript declaration for our close handlers
+  private _streamCloseHandlers?: Map<number, () => void>;
 
   constructor(log: Logger, cameraName: string, videoConfig: VideoConfig, api: API, hap: HAP, videoProcessor?: string) {
     this.log = log
@@ -458,60 +550,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           this.log.debug(`Socket closed ${hadError ? 'with' : 'without'} error`, this.cameraName);
         });
 
-        const generatorFunction = async function* (this: any): AsyncGenerator<MP4Atom> {
-          this.log.debug(`generator: iniciando leitura em ${new Date().toISOString()}`, this.cameraName);
-          try {
-            while (true) {
-              let header;
-              try {
-                header = await readLength(socket, 8);
-                if (!header || header.length < 8) {
-                  this.log.error(`Invalid header received: ${header ? header.length : 'null'} bytes`, this.cameraName);
-                  return; // End generator instead of throwing
-                }
-              } catch (error) {
-                this.log.debug(`Stream ended while reading header: ${error}`, this.cameraName);
-                return; // End generator instead of throwing
-              }
-
-              const length = header.readInt32BE(0) - 8;
-              const type = header.slice(4).toString();
-
-              this.log.debug(`Received MP4 box of type: ${type}, length: ${length + 8}`, this.cameraName);
-
-              if (length < 0) {
-                this.log.error(`Invalid box length: ${length}`, this.cameraName);
-                return; // End generator instead of throwing
-              }
-
-              let data;
-              try {
-                data = await readLength(socket, length);
-              } catch (error) {
-                this.log.debug(`Stream ended while reading data: ${error}`, this.cameraName);
-                return; // End generator instead of throwing
-              }
-
-              yield {
-                header,
-                length,
-                type,
-                data,
-              }
-            }
-          } catch (error) {
-            this.log.error(`Error in MP4 generator: ${error}`, this.cameraName);
-            // Don't re-throw, just end the generator
-          }
-        };
-
+        // Use the parseFragmentedMP4 generator with logging
+        const generator = parseFragmentedMP4(socket, this.log, this.cameraName);
         const cp = this.process;
-        const generatorBound = generatorFunction.bind(this); // Bind 'this' to access logger
 
         resolve({
           socket,
           cp,
-          generator: generatorBound(),
+          generator,
         })
       })
 

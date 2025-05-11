@@ -22,6 +22,7 @@ export class PreBuffer {
   moov!: MP4Atom
   idrInterval = 0
   prevIdr = 0
+  private activeAtomListeners = 0
 
   private readonly log: Logger
   private readonly ffmpegInput: string
@@ -34,6 +35,9 @@ export class PreBuffer {
     this.ffmpegInput = ffmpegInput
     this.cameraName = cameraName
     this.ffmpegPath = videoProcessor
+
+    // Set a higher limit for the event emitter to prevent warnings
+    this.events.setMaxListeners(50)
   }
 
   async startPreBuffer(): Promise<Mp4Session> {
@@ -150,6 +154,11 @@ export class PreBuffer {
       }
 
       this.events.on('atom', writeAtom)
+      this.activeAtomListeners++
+
+      if (this.activeAtomListeners > 0 && this.activeAtomListeners % 10 === 0) {
+        this.log.debug(`Active atom listeners: ${this.activeAtomListeners}`, this.cameraName)
+      }
 
       cleanup = (): void => {
         this.log.info('prebuffer request ended', this.cameraName)
@@ -157,6 +166,9 @@ export class PreBuffer {
         this.events.removeListener('killed', cleanup)
         socket.removeAllListeners()
         socket.destroy()
+
+        // Decrement the counter to keep track of active listeners
+        this.activeAtomListeners = Math.max(0, this.activeAtomListeners - 1)
       }
 
       this.events.once('killed', cleanup)
